@@ -10,37 +10,50 @@
 
 #define OFF_FIRMWARE_NAME 0
 #define OFF_POS_U         20
-#define OFF_POS_V         22
-#define OFF_POS_X         24
-#define OFF_POS_Y         26
-#define OFF_IP            28
+#define OFF_POS_V         24
+#define OFF_POS_X         28
+#define OFF_POS_Y         32
+#define OFF_IP            36
 
-#define DEFAULT_SPEED 15
+#define DEFAULT_SPEED 50
 #define VSPEED_MIN 5
 #define USPEED_MIN 10
-#define VSPEED_MAX 20
-#define USPEED_MAX 20
+//#define VSPEED_MAX DEFAULT_SPEED
+//#define USPEED_MAX DEFAULT_SPEED
 #define MOVE_RESOLUTION 5
 #define MOVE_EPSILON 2
 #define TURN_DELAY_V 250
 //#define MOVE_DELAY 250
 
-#define DEBUG_UV
+//#define DEBUG_MATH
 #define DEBUG_MOVE
-#define DEBUG_MOVE_POS
+//#define DEBUG_MOVE_POS
 
 #define PANIC_ON_ERROR
 
-// Device parameters
-#define L1 70
-#define L2 110
-#define R 15
-#define KU 1.0
-#define KV (90.0/16.0)
-#define U0 0
-#define V0 94.1
-#define X_OFFSET 0
-#define Y_OFFSET 80
+#define U2MM(u) (((float)(u))/100.0)
+#define MM2U(m) ((long)(((m)*100.0)))
+
+// some mentally challenged robotc developer though
+// radiansToDegrees should return short and not float
+#define RAD2DEG(rad) ((rad)*360.0/(2.0*PI))
+#define DEG2RAD(deg) ((deg)*2.0*PI/360.0)
+
+// XXX: This guy https://github.com/cavenel/ev3-print3rbot/blob/master/writer.py
+// uses 2970, but my tests gave 3635
+#define A2TC(theta) ((theta)*3635.0/90.0)
+#define TC2A(tacho) ((tacho)*90.0/3635.0)
+
+// Device parameters (mm)
+// Note: if you change HW_R1 you must change HW_Ay and vice versa
+// such that uv_to_xy maps origin to origin
+#define HW_D  24.0
+#define HW_R1 145.0
+#define HW_R2 89.0
+#define HW_Ax (-HW_D/2)
+#define HW_Ay (-104.0)
+#define HW_Bx (-HW_Ax)
+#define HW_By HW_Ay
 
 void init();
 void reset_position();
@@ -54,14 +67,13 @@ void loop_watch_mbox(TMailboxIDs mbox);
 void dispatch_buf(ubyte *buf, unsigned short sz);
 unsigned short dispatch_cmd(ubyte *buf);
 
-int min(int a, int b);
-int max(int a, int b);
-int clamp(int x, int m, int M);
-void xy_to_uv(int *u, int *v, int x, int y);
-void uv_to_xy(int *x, int *y, int u, int v);
+void cc_intersect(float *ix1, float *iy1, float *ix2, float *iy2,
+	float x1, float y1, float r1, float x2, float y2, float r2);
+void xy_to_uv(long *u, long *v, long x, long y);
+void uv_to_xy(long *x, long *y, long u, long v);
 
-void move_enc_xy(long x, long y, float speed);
-void move_enc_uv(long b, long c, float speed);
+void move_xy(long x, long y, float speed);
+void move_uv(long b, long c, float speed);
 void move_delta_xy(long dx, long dy, float speed);
 void move_delta_uv(long db, long dc, float speed);
 void move_z(int up);
@@ -71,7 +83,7 @@ void write(ubyte *data, unsigned short off, unsigned short len);
 
 void panic();
 
-void test_circle(int r, int N);
+void test_circle(long r, int N);
 
 task update_state();
 task poll_control();
@@ -85,7 +97,6 @@ run_opt_s run_opt;
 typedef struct {
 	int ld_v;
 	unsigned int ip;
-	int pen_up;
 } run_state_s;
 
 run_state_s run_state;
@@ -96,7 +107,7 @@ task main() {
 
 	init();
 
-	//reset_axes();
+	reset_axes();
 	reset_position();
 	reset_run_state();
 
@@ -107,12 +118,12 @@ task main() {
 }
 
 task update_state(){
-	ubyte buf[8];
+	long buf[4];
 	for(;;){
-		*((int *)buf[0]) = nMotorEncoder[motorB];
-		*((int *)buf[2]) = nMotorEncoder[motorC];
-		uv_to_xy((int *) &buf[4], (int *) &buf[6], *((int *)buf[0]), *((int *)buf[2]));
-		write(buf, OFF_POS_U, 8);
+		buf[0] = nMotorEncoder[motorB];
+		buf[1] = nMotorEncoder[motorC];
+		uv_to_xy(&buf[2], &buf[3], buf[0], buf[1]);
+		write((ubyte *) buf, OFF_POS_U, 16);
 		wait1Msec(100);
 	}
 }
@@ -127,17 +138,14 @@ void init(){
 	for(tMotor m=motorA;m<=motorC;m++){
 		nMotorPIDSpeedCtrl[m] = mtrNoReg;
 	}
+	SensorType[S1] = sensorTouch;
+	SensorType[S2] = sensorTouch;
 
 	run_opt.speed = DEFAULT_SPEED;
 
 	ubyte fwname[20];
 	strcpy((char *)fwname, FW_NAME);
 	write(fwname, OFF_FIRMWARE_NAME, 20);
-
-	// make sure pen is up after init
-	run_state.pen_up = 1;
-	move_z(0);
-	move_z(1);
 }
 
 void reset_position(){
@@ -147,19 +155,16 @@ void reset_position(){
 }
 
 void reset_axes(){
-	// no need to touch x here
-	motor[motorC] = -20;
+	motor[motorB] = -100;
+	motor[motorC] = 100;
 	for(;;){
-		long enc = nMotorEncoder[motorC];
-		wait1Msec(200);
-		if(enc-nMotorEncoder[motorC] < 10)
+		if(SensorValue[S1])
+			motor[motorB] = 0;
+		if(SensorValue[S2])
+			motor[motorC] = 0;
+		if(SensorValue[S1] && SensorValue[S2])
 			break;
 	}
-
-	bFloatDuringInactiveMotorPWM = true;
-	motor[motorC] = 0;
-	wait1Msec(500);
-	bFloatDuringInactiveMotorPWM = false;
 }
 
 void reset_run_state(){
@@ -268,17 +273,17 @@ unsigned short dispatch_cmd(ubyte *buf){
 	writeDebugStream("dispatch_cmd: opcode: %d\n", opcode);
 	switch(opcode){
 		case 'M':
-			move_enc_xy(buf[1]|buf[2]<<8, buf[3]|buf[4]<<8, run_opt.speed);
+			move_xy(*((long *)&buf[1]),*((long *)&buf[5]), run_opt.speed);
 #ifdef MOVE_DELAY
 			wait1Msec(MOVE_DELAY);
 #endif
-			return 5;
+			return 9;
 		case 'm':
-			move_delta_xy(buf[1]|buf[2]<<8, buf[3]|buf[4]<<8, run_opt.speed);
+			move_delta_xy(*((long *)&buf[1]), *((long *)&buf[5]), run_opt.speed);
 #ifdef MOVE_DELAY
 			wait1Msec(MOVE_DELAY);
 #endif
-			return 5;
+			return 9;
 		case 'Z':
 			move_z(buf[1]);
 			return 2;
@@ -318,52 +323,112 @@ int clamp(int x, int m, int M){
 	return x < m ? m : (x > M ? M : x);
 }
 
-void xy_to_uv(int *u, int *v, int x, int y){
-	x += X_OFFSET;
-	y += Y_OFFSET;
+// Compute intersects (ix1, iy1), (ix2, iy2)
+// of circles at (x1, y1) of radius r1 and (x2, y2) of radius r2
+// algorithm: https://math.stackexchange.com/a/1367732
+void cc_intersect(float *ix1, float *iy1, float *ix2, float *iy2,
+	float x1, float y1, float r1, float x2, float y2, float r2){
 
-	*u = (int) (KU * (U0 + (360.0 * x / (2.0 * PI * R)) ));
+	float dx = x1 - x2;
+	float dy = y1 - y2;
+	float R2 = dx*dx + dy*dy;
 
-	float f = y*y + L1*L1 - L2*L2;
+	float rr2 = r1*r1 - r2*r2;
+	float a = rr2 / R2;
+	float b = sqrt(2.0*(r1*r1 + r2*r2)/R2 - a*a - 1.0);
 
-#ifdef DEBUG_UV
-	writeDebugStream("uv: %f = %d^2 + %d^2 - %d^2\n", f, y, L1, L2);
+#ifdef DEBUG_MATH
+	writeDebugStream("cc_int: a=%f b=%f, R^2=%f, rr2=%f\n", a, b, R2, rr2);
 #endif
 
-	f /= 2.0 * L1 * y;
+	*ix1 = ( (x1+x2) + a*(x2-x1) + b*(y2-y1) ) / 2.0;
+	*iy1 = ( (y1+y2) + a*(y2-y1) + b*(x1-x2) ) / 2.0;
 
-	if(abs(f) > 0.99){
-#ifdef DEBUG_UV
-		writeDebugStream("uv: got cos out of bounds (%f), truncating\n", f);
+	*ix2 = ( (x1+x2) + a*(x2-x1) - b*(y2-y1) ) / 2.0;
+	*iy2 = ( (y1+y2) + a*(y2-y1) - b*(x1-x2) ) / 2.0;
+
+#ifdef DEBUG_MATH
+	writeDebugStream("cc_int: (%f, %f)r%f + (%f, %f)r%f\n", x1, y1, r1, x2, y2, r2, );
+	writeDebugStream("     -> (%f, %f) & (%f, %f)\n", *ix1, *iy1, *ix2, *iy2);
 #endif
-		f = 0.99 * sgn(f);
+}
+
+// Pretty much the same transform as in here
+// https://github.com/cavenel/ev3-print3rbot/blob/master/writer.py
+void xy_to_uv(long *u, long *v, long x, long y){
+	const float Ex = U2MM(x), Ey = U2MM(y);
+	float Cx, Cy, Dx, Dy;
+
+	float ix, iy;
+
+	cc_intersect(&Cx, &Cy, &ix, &iy, HW_Ax, HW_Ay, HW_R2, Ex, Ey, HW_R1);
+	if(Cx > ix){
+		Cx = ix;
+		Cy = iy;
 	}
 
-#ifdef DEBUG_UV
-	writeDebugStream("uv: acos(%f) = %f\n", f, acos(f));
+	cc_intersect(&Dx, &Dy, &ix, &iy, HW_Bx, HW_By, HW_R2, Ex, Ey, HW_R1);
+	if(Dx < ix){
+		Dx = ix;
+		Dy = iy;
+	}
+
+#ifdef DEBUG_MATH
+	writeDebugStream("uv_to_xy: C(%f, %f) D(%f, %f)\n", Cx, Cy, Dx, Dy);
 #endif
 
-	*v = (int) (KV * (V0 - radiansToDegrees(acos(f))));
+#ifdef PANIC_ON_ERROR
+	if(Cx > HW_Ax || Dx < HW_Bx){
+		nxtDisplayTextLine(0, "Invalid coords");
+		nxtDisplayTextLine(1, "xy (%f, %f)", Ex, Ey);
+		nxtDisplayTextLine(2, "A(%f, %f)", HW_Ax, HW_Ay);
+		nxtDisplayTextLine(3, "B(%f, %f)", HW_Bx, HW_By);
+		nxtDisplayTextLine(4, "C(%f, %f)", Cx, Cy);
+		nxtDisplayTextLine(5, "D(%f, %f)", Dx, Dy);
+		panic();
+	}
+#endif
+
+	float alpha = acos((HW_Ax-Cx)/HW_R2);
+	float beta = acos((Dx-HW_Bx)/HW_R2);
+
+#ifdef DEBUG_MATH
+	writeDebugStream("uv_to_xy: alpha(%f) = acos(%f), beta(%f) = acos(%f)\n",
+		alpha, (HW_Ax-Cx)/HW_R2, (Dx-HW_Bx)/HW_R2, beta );
+#endif
+
+	*u = (long) (A2TC(RAD2DEG(alpha)));
+	*v = (long) -(A2TC(RAD2DEG(beta)));
 }
 
-void uv_to_xy(int *x, int *y, int u, int v){
-	u = u/KU - U0;
-	v = V0 - v/KV;
+void uv_to_xy(long *x, long *y, long u, long v){
+	float alpha = TC2A(DEG2RAD(u));
+	float beta = TC2A(DEG2RAD(u));
 
-	*x = (int) (2 * PI * R * u / 360.0) - X_OFFSET;
+	float Cx = HW_Ax - HW_R2 * cos(alpha);
+	float Cy = HW_Ay + HW_R2 * sin(alpha);
+	float Dx = HW_Bx + HW_R2 * cos(beta);
+	float Dy = HW_By + HW_R2 * sin(beta);
 
-	float cos_v = cos(degreesToRadians(v));
-	*y = (int) (L1*cos_v + sqrt(L2*L2 - (L1*L1)*(1 - cos_v*cos_v)) - Y_OFFSET);
+	float ix1, iy1, ix2, iy2;
+	cc_intersect(&ix1, &iy1, &ix2, &iy2, Cx, Cy, HW_R1, Dx, Dy, HW_R1);
+	if(iy2 > iy1){
+		ix1 = ix2;
+		iy1 = iy2;
+	}
+
+	*x = MM2U(ix1);
+	*y = MM2U(iy1);
 }
 
-void move_enc_xy(long x, long y, float speed){
-	int u, v;
+void move_xy(long x, long y, float speed){
+	long u, v;
 	xy_to_uv(&u, &v, x, y);
 	writeDebugStream("xy(%d, %d) => uv(%d, %d)\n", x, y, u, v);
-	move_enc_uv(u, v, speed);
+	move_uv(u, v, speed);
 }
 
-void move_enc_uv(long b, long c, float speed){
+void move_uv(long b, long c, float speed){
 #ifdef DEBUG_MOVE
 	writeDebugStream("move_enc_uv (%d, %d) => (%d, %d)\n",
 		nMotorEncoder[motorB], nMotorEncoder[motorC], b, c);
@@ -408,8 +473,17 @@ void move_enc_uv(long b, long c, float speed){
 			pv = VSPEED_MIN;
 		}
 
+#ifdef USPEED_MAX
 		pu = mu * min(pu, USPEED_MAX);
+#else
+		pu = mu * min(pu, speed);
+#endif
+
+#ifdef VSPEED_MAX
 		pv = mv * min(pv, VSPEED_MAX);
+#else
+		pv = mv * min(pv, speed);
+#endif
 
 #if defined(DEBUG_MOVE) && defined(DEBUG_MOVE_POS)
 		writeDebugStream("%-5d %-5d\n", pu, pv);
@@ -433,28 +507,24 @@ void move_enc_uv(long b, long c, float speed){
 }
 
 void move_delta_uv(long db, long dc, float speed){
-	move_enc_uv(nMotorEncoder[motorB] + db, nMotorEncoder[motorC] + dc, speed);
+	move_uv(nMotorEncoder[motorB] + db, nMotorEncoder[motorC] + dc, speed);
 }
 
 void move_delta_xy(long dx, long dy, float speed){
-	int x, y;
+	long x, y;
 	uv_to_xy(&x, &y, nMotorEncoder[motorB], nMotorEncoder[motorC]);
-	move_enc_xy(x+dx, y+dy, speed);
+	move_xy(x+dx, y+dy, speed);
 }
 
 void move_z(int up){
-	if(run_state.pen_up == up)
-		return;
-
-	run_state.pen_up = up;
-
-	// Motor encoders don't work here so this is timed
-	/*
 	motor[motorA] = up ? 50 : -50;
-	wait1Msec(500);
+	for(;;){
+		long enc = nMotorEncoder[motorA];
+		wait1Msec(50);
+		if(enc == nMotorEncoder[motorA])
+			break;
+	}
 	motor[motorA] = 0;
-	*/
-	// NVM it doesn't work anyway
 }
 
 void set_ip(unsigned int ip){
@@ -473,11 +543,13 @@ void panic(){
 	for(;;) wait1Msec(1000);
 }
 
-void test_circle(int r, int N){
+void test_circle(long r, int N){
+	// make calculations in mm to avoid overflows
+	float r_mm = U2MM(r);
 	for(int i=0;i<N;i++){
-		int x = (r+5) + (int) (r*cos(2*PI*i/N));
-		int y = (r+5) + (int) (r*sin(2*PI*i/N));
-		move_enc_xy(x, y, run_opt.speed);
-		wait1Msec(500);
+		float x_mm = (float) (r_mm*cos(-2*PI*((float)i)/((float)N)));
+		float y_mm = (float) ( (r_mm+5) + r_mm*sin(-2*PI*((float)i)/((float)N)) );
+		move_xy(MM2U(x_mm), MM2U(y_mm), run_opt.speed);
+		wait1Msec(100);
 	}
 }
