@@ -27,7 +27,7 @@
 
 //#define DEBUG_MATH
 #define DEBUG_MOVE
-//#define DEBUG_MOVE_POS
+#define DEBUG_MOVE_POS
 
 #define PANIC_ON_ERROR
 
@@ -66,6 +66,9 @@ unsigned short wait_mes(TMailboxIDs mbox);
 void loop_watch_mbox(TMailboxIDs mbox);
 void dispatch_buf(ubyte *buf, unsigned short sz);
 unsigned short dispatch_cmd(ubyte *buf);
+
+int b2i(ubyte *buf);
+long b2l(ubyte *buf);
 
 void cc_intersect(float *ix1, float *iy1, float *ix2, float *iy2,
 	float x1, float y1, float r1, float x2, float y2, float r2);
@@ -158,11 +161,14 @@ void reset_axes(){
 	motor[motorB] = -100;
 	motor[motorC] = 100;
 	for(;;){
-		if(SensorValue[S1])
+		int sv1 = SensorValue[S1];
+		int sv2 = SensorValue[S2];
+
+		if(sv1)
 			motor[motorB] = 0;
-		if(SensorValue[S2])
+		if(sv2)
 			motor[motorC] = 0;
-		if(SensorValue[S1] && SensorValue[S2])
+		if(sv1 && sv2)
 			break;
 	}
 }
@@ -273,13 +279,13 @@ unsigned short dispatch_cmd(ubyte *buf){
 	writeDebugStream("dispatch_cmd: opcode: %d\n", opcode);
 	switch(opcode){
 		case 'M':
-			move_xy(*((long *)&buf[1]),*((long *)&buf[5]), run_opt.speed);
+			move_xy(b2l(&buf[1]), b2l(&buf[5]), run_opt.speed);
 #ifdef MOVE_DELAY
 			wait1Msec(MOVE_DELAY);
 #endif
 			return 9;
 		case 'm':
-			move_delta_xy(*((long *)&buf[1]), *((long *)&buf[5]), run_opt.speed);
+			move_delta_xy(b2l(&buf[1]), b2l(&buf[5]), run_opt.speed);
 #ifdef MOVE_DELAY
 			wait1Msec(MOVE_DELAY);
 #endif
@@ -288,7 +294,7 @@ unsigned short dispatch_cmd(ubyte *buf){
 			move_z(buf[1]);
 			return 2;
 		case 'I':
-			set_ip(buf[1]|buf[2]<<8);
+			set_ip(b2i(&buf[1]));
 			return 3;
 		case 'R':
 			reset_axes();
@@ -309,6 +315,14 @@ unsigned short dispatch_cmd(ubyte *buf){
 	// Skip the whole buffer
 	return (unsigned short) (-1);
 #endif
+}
+
+int b2i(ubyte *buf){
+	return buf[0] | buf[1] << 8;
+}
+
+long b2l(ubyte *buf){
+	return buf[0] | buf[1] << 8 | buf[2] << 16 | buf[3] << 24;
 }
 
 int min(int a, int b){
